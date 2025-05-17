@@ -64,13 +64,8 @@ if [[ -f "$mirrorlist_file" ]]; then
   done < "$mirrorlist_file"
 else
   echo "Файл $mirrorlist_file не найден. Используются зеркала по умолчанию (если они были заданы ранее)." >&2
-  # Здесь можно либо выйти с ошибкой, либо использовать старый жестко закодированный список,
-  # либо оставить mirrors пустым, что приведет к ошибке ниже, если ни одно зеркало не будет доступно.
-  # Для данного примера, если файл не найден, mirrors останется пустым,
-  # и скрипт выйдет с ошибкой "No mirror reachable", если не будет зеркал.
 fi
 
-# выбираем первое отвечающее зеркало и подставляем его в source_url
 for m in "${mirrors[@]}"; do
   if rsync --list-only --timeout=5 --contimeout=5 "$m" "$target" &>/dev/null; then
     source_url="$m"
@@ -78,7 +73,6 @@ for m in "${mirrors[@]}"; do
   fi
 done
 
-# если ни одно зеркало не отвечает — выходим
 if [[ -z "$source_url" ]]; then
   echo "No mirror reachable" >&2
   exit 1
@@ -135,14 +129,13 @@ rsync_cmd \
   "${source_url}" \
   "${target}"
 
-# Обновляем локальный timestamp для следующей проверки
 curl -Ls "$lastupdate_url" > "${target}/lastupdate"
 
 #echo "Last sync was $(date -d @$(cat ${target}/lastsync))"
 
 
 
-###### НОВОЕ #########
+###### NEW #########
 # ===== Автоматическая индексация локальных репозиториев =====
 # Для core-local, extra-local, community-local, multilib-local
 
