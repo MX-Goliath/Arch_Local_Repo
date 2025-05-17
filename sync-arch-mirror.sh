@@ -37,15 +37,38 @@ lock="$target/syncrepo.lck"
 # The default unit is KiB (see man rsync /--bwlimit for more)
 bwlimit=0
 
-# ======= Ваши зеркала (rsync-URL) =======
-mirrors=(
-  "rsync://repository.su/archlinux"
-  "rsync://mirrors.powernet.com.ru/pub/archlinux"
-  "rsync://mirror.truenetwork.ru/archlinux"
-  "rsync://mirror2.sl-chat.ru/archlinux"
-  "rsync://mirror3.sl-chat.ru/archlinux"
-  "rsync://mirror.nw-sys.ru/archlinux"
-)
+# mirrors=(
+# "rsync://repository.su/archlinux"
+# "rsync://mirrors.powernet.com.ru/pub/archlinux"
+# "rsync://mirror.truenetwork.ru/archlinux"
+# "rsync://mirror2.sl-chat.ru/archlinux"
+# "rsync://mirror3.sl-chat.ru/archlinux"
+# "rsync://mirror.nw-sys.ru/archlinux"
+# )
+
+# Получаем зеркала из /etc/pacman.d/mirrorlist
+mirrorlist_file="/etc/pacman.d/mirrorlist"
+mirrors=()
+
+if [[ -f "$mirrorlist_file" ]]; then
+  while IFS= read -r line; do
+    if [[ "$line" == "Server = "* ]]; then
+      # Извлекаем URL
+      url="${line#Server = }"
+      # Преобразуем https:// в rsync://
+      rsync_url="${url/https:\/\//rsync:\/\/}"
+      # Удаляем /$repo/os/$arch
+      rsync_url="${rsync_url/\/\$repo\/os\/\$arch/}"
+      mirrors+=("$rsync_url")
+    fi
+  done < "$mirrorlist_file"
+else
+  echo "Файл $mirrorlist_file не найден. Используются зеркала по умолчанию (если они были заданы ранее)." >&2
+  # Здесь можно либо выйти с ошибкой, либо использовать старый жестко закодированный список,
+  # либо оставить mirrors пустым, что приведет к ошибке ниже, если ни одно зеркало не будет доступно.
+  # Для данного примера, если файл не найден, mirrors останется пустым,
+  # и скрипт выйдет с ошибкой "No mirror reachable", если не будет зеркал.
+fi
 
 # выбираем первое отвечающее зеркало и подставляем его в source_url
 for m in "${mirrors[@]}"; do
