@@ -146,14 +146,40 @@ arch=$(uname -m)
 for repo in core extra community multilib; do
   repo_dir="$target/$repo/os/$arch"
   db_name="${repo}-local.db.tar.gz"
+  db_path="$repo_dir/$db_name"
+  state_file="$repo_dir/${repo}-local.state" # Файл для хранения хэша состояния пакетов
 
   # Пропускаем, если каталога нет
   [[ ! -d "$repo_dir" ]] && continue
 
-  echo "Indexing $repo-local in $repo_dir..."
+  # Собираем информацию о текущих .pkg.tar.zst файлах (имя, размер, время модификации)
+  # и вычисляем хэш этого состояния.
+  current_pkg_files_details=""
+  # Проверяем, есть ли пакеты, чтобы find не выдавал ошибку в пустом каталоге при использовании -printf
+  if compgen -G "$repo_dir/*.pkg.tar.zst" > /dev/null; then
+      current_pkg_files_details=$(find "$repo_dir" -maxdepth 1 -name '*.pkg.tar.zst' -printf '%f\t%s\t%T@\n' | sort)
+  fi
+  current_pkg_state_hash=$(echo -n "$current_pkg_files_details" | sha256sum | awk '{print $1}')
 
-  # Генерируем/обновляем базу
-  repo-add \
-    "$repo_dir/$db_name" \
-    "$repo_dir"/*.pkg.tar.zst
+  old_pkg_state_hash=""
+  if [[ -f "$state_file" ]]; then
+    old_pkg_state_hash=$(cat "$state_file")
+  fi
+
+  if [[ "$current_pkg_state_hash" != "$old_pkg_state_hash" ]]; then
+    echo "Обнаружены изменения для $repo-local в $repo_dir (или отсутствует файл состояния). Запуск индексации..."
+
+    # Генерируем/обновляем базу
+    if repo-add "$db_path" "$repo_dir"/*.pkg.tar.zst; then
+      # Сохраняем новый хэш состояния после успешной индексации
+      echo "$current_pkg_state_hash" > "$state_file"
+      echo "Индексация $repo-local успешно завершена, файл состояния обновлен."
+    else
+      echo "Ошибка во время выполнения repo-add для $repo-local. Файл состояния не обновлен." >&2
+      # Можно добавить удаление файла состояния, чтобы гарантировать повторную попытку при следующем запуске
+      # rm -f "$state_file"
+    fi
+  else
+    echo "Изменений для $repo-local в $repo_dir не обнаружено. Пропуск индексации."
+  fi
 done
