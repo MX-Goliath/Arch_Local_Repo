@@ -148,6 +148,207 @@ show_main_menu() {
 }
 
 # Показать список пакетов
+list_packages_cli() {
+  print_colored $BLUE "📋 Список пакетов для сборки:"
+  
+  if [[ ! -s "$aur_packages_file" ]]; then
+    print_colored $YELLOW "Список пакетов пуст"
+    return
+  fi
+  
+  while IFS= read -r package; do
+    [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+    
+    local status_icon="❓"
+    local local_pkg=$(find "$aur_repo_dir" -name "${package}-*.pkg.tar.zst" -type f | head -1)
+    
+    if [[ -n "$local_pkg" ]]; then
+      status_icon="✅" # Собран
+    else
+      status_icon="❌" # Не собран
+    fi
+    
+    echo " $status_icon $package"
+  done < "$aur_packages_file"
+}
+
+# Добавить пакеты
+add_packages_cli() {
+  if [[ $# -eq 0 ]]; then
+    print_colored $RED "Ошибка: не указаны пакеты для добавления."
+    echo "Использование: $(basename "$0") -A <пакет1> [пакет2]..."
+    return 1
+  fi
+  
+  for package in "$@"; do
+    if [[ -z "$package" ]]; then
+      print_colored $YELLOW "Пропущено пустое имя пакета."
+      continue
+    fi
+    
+    # Проверяем существование пакета в AUR
+    print_colored $YELLOW "Проверка пакета $package в AUR..."
+    if yay -Si "$package" >/dev/null 2>&1; then
+      if ! grep -q "^$package$" "$aur_packages_file"; then
+        echo "$package" >> "$aur_packages_file"
+        print_colored $GREEN "✅ Пакет $package добавлен в список"
+      else
+        print_colored $YELLOW "⚠️  Пакет $package уже в списке"
+      fi
+    else
+      print_colored $RED "❌ Пакет $package не найден в AUR"
+    fi
+  done
+}
+
+# Удалить пакеты
+remove_packages_cli() {
+  if [[ $# -eq 0 ]]; then
+    print_colored $RED "Ошибка: не указаны пакеты для удаления."
+    echo "Использование: $(basename "$0") -R <пакет1> [пакет2]..."
+    return 1
+  fi
+
+  local changed=false
+  for package_to_remove in "$@"; do
+    if grep -q "^${package_to_remove}$" "$aur_packages_file"; then
+      sed -i "/^${package_to_remove}$/d" "$aur_packages_file"
+      rm -f "$aur_repo_dir"/${package_to_remove}-*.pkg.tar.zst
+      print_colored $GREEN "✅ Пакет $package_to_remove удален из списка и репозитория."
+      changed=true
+    else
+      print_colored $YELLOW "⚠️ Пакет '$package_to_remove' не найден в списке."
+    fi
+  done
+
+  if [[ "$changed" == "true" ]]; then
+    update_repository
+  fi
+}
+
+# Информация о пакете
+package_info_cli() {
+  local package=$1
+  if [[ -z "$package" ]]; then
+    print_colored $RED "❌ Имя пакета не может быть пустым."
+    echo "Использование: $(basename "$0") -Qi <пакет>"
+    return 1
+  fi
+  
+  print_colored $BLUE "📦 Информация о пакете: $package"
+  echo ""
+  
+  # Проверяем в списке
+  if grep -q "^$package$" "$aur_packages_file"; then
+    print_colored $GREEN "✅ Пакет в списке для сборки"
+  else
+    print_colored $YELLOW "⚠️  Пакет НЕ в списке для сборки"
+  fi
+  
+  # Проверяем локальную версию
+  local local_pkg=$(find "$aur_repo_dir" -name "${package}-*.pkg.tar.zst" -type f | head -1)
+  if [[ -n "$local_pkg" ]]; then
+    local pkg_size=$(du -h "$local_pkg" | cut -f1)
+    print_colored $GREEN "📁 Локальная версия: $(basename "$local_pkg") ($pkg_size)"
+  else
+    print_colored $YELLOW "📁 Локальная версия: отсутствует"
+  fi
+  
+  # Информация из AUR
+  echo ""
+  print_colored $BLUE "🌐 Информация из AUR:"
+  if ! yay -Si "$package" 2>/dev/null; then
+    print_colored $RED "❌ Пакет не найден в AUR"
+  fi
+}
+
+# Очистка старых пакетов
+clean_old_packages_cli() {
+  print_colored $BLUE "🧹 Очистка старых пакетов"
+  echo ""
+  
+  # Получаем список установленных пакетов из списка
+  local keep_packages=()
+  while IFS= read -r package; do
+    [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+    keep_packages+=("$package")
+  done < "$aur_packages_file"
+  
+  # Находим пакеты для удаления
+  local to_remove=()
+  for pkg_file in "$aur_repo_dir"/*.pkg.tar.zst; do
+    [[ ! -f "$pkg_file" ]] && continue
+    
+    local pkg_name=$(basename "$pkg_file" | sed 's/-[^-]*-[^-]*\.pkg\.tar\.zst$//')
+    local found=false
+    
+    for keep_pkg in "${keep_packages[@]}"; do
+      if [[ "$pkg_name" == "$keep_pkg" ]]; then
+        found=true
+        break
+      fi
+    done
+    
+    if [[ "$found" == "false" ]]; then
+      to_remove+=("$(basename "$pkg_file")")
+    fi
+  done
+  
+  if [[ ${#to_remove[@]} -eq 0 ]]; then
+    print_colored $GREEN "✅ Старые пакеты для удаления не найдены"
+  else
+    print_colored $YELLOW "Найдено старых пакетов для удаления: ${#to_remove[@]}"
+    echo ""
+    printf '   %s\n' "${to_remove[@]}"
+    echo ""
+    
+    if confirm "Удалить эти пакеты?"; then
+      for pkg in "${to_remove[@]}"; do
+        rm -f "$aur_repo_dir/$pkg"
+        print_colored $GREEN "🗑️  Удален: $pkg"
+      done
+      echo ""
+      update_repository
+    fi
+  fi
+}
+
+# Функция вывода справки
+usage() {
+  echo "Менеджер локального AUR репозитория"
+  echo ""
+  echo "Использование: $(basename "$0") [ОПЦИИ] [АРГУМЕНТЫ...]"
+  echo ""
+  echo "Режимы работы:"
+  echo "  -h, --help                Показать это справочное сообщение."
+  echo "  -S, --sync [пакеты...]    Собрать/обновить пакеты. Без аргументов - обновить все из списка."
+  echo "                            С аргументами - принудительно пересобрать указанные пакеты."
+  echo "  -A, --add <пакеты...>     Добавить один или несколько пакетов в список для сборки."
+  echo "  -R, --remove <пакеты...>  Удалить пакеты из списка и локального репозитория."
+  echo "  -Q, --query               Запрос к списку пакетов или информации о пакете."
+  echo "  -C, --clean               Удалить из репозитория старые пакеты, отсутствующие в списке."
+  echo "  -U, --update-db           Принудительно обновить базу данных репозитория."
+  echo "  --setup-pacman            Интерактивно настроить /etc/pacman.conf."
+  echo ""
+  echo "Опции для режимов:"
+  echo "  -i, --info <пакет>        (для -Q) Показать подробную информацию о пакете."
+  echo "  -l, --list                (для -Q) Показать список всех пакетов для сборки (действие по умолчанию)."
+  echo "  --force                   (для -S) Принудительно пересобрать все пакеты из списка."
+  echo "  --quiet                   (для -S) Тихий режим сборки с меньшим количеством вывода."
+  echo ""
+  echo "Примеры:"
+  echo "  $(basename "$0")                          # Запустить интерактивный режим"
+  echo "  $(basename "$0") -S                      # Обновить все пакеты по списку"
+  echo "  $(basename "$0") -S --force             # Принудительно пересобрать все пакеты"
+  echo "  $(basename "$0") -S clementine-git      # Пересобрать только 'clementine-git'"
+  echo "  $(basename "$0") -A package1 package2      # Добавить два пакета в список"
+  echo "  $(basename "$0") -R package1              # Удалить пакет из списка"
+  echo "  $(basename "$0") -Ql                      # Показать список пакетов"
+  echo "  $(basename "$0") -Qi clementine-git       # Информация о пакете 'clementine-git'"
+  echo "  $(basename "$0") -C                       # Начать очистку старых пакетов"
+}
+
+# Показать список пакетов
 list_packages_interactive() {
   show_header
   print_colored $BLUE "📋 Список пакетов для сборки:"
@@ -295,30 +496,48 @@ build_settings_interactive() {
 
 # Собираем пакеты
 build_packages() {
+  local single_package_rebuild=""
+  if [[ $# -gt 0 ]]; then
+    single_package_rebuild=$1
+  fi
+
   if [ ! -s "$aur_packages_file" ]; then
     print_colored $YELLOW "Список пакетов пуст. Добавьте пакеты перед сборкой."
     return 0
   fi
 
-  # Создаем временную директорию для сборки
-  mkdir -p "$build_dir"
-  cd "$build_dir" || exit 1
+  # Создаем временную директорию для сборки только при необходимости
+  # mkdir -p "$build_dir"
+  # cd "$build_dir" || exit 1
 
   local built_packages=()
   local failed_packages=()
-  local total_packages=$(grep -c '^[^#]' "$aur_packages_file")
+  
+  local packages_to_process_list
+  if [[ -n "$single_package_rebuild" ]]; then
+    # Проверяем, есть ли пакет в списке
+    if ! grep -q "^${single_package_rebuild}$" "$aur_packages_file"; then
+      print_colored $RED "❌ Пакет '$single_package_rebuild' не найден в вашем списке."
+      return 1
+    fi
+    packages_to_process_list="$single_package_rebuild"
+  else
+    packages_to_process_list=$(grep '^[^#]' "$aur_packages_file")
+  fi
+
+  local total_packages=$(echo "$packages_to_process_list" | wc -l)
   local current=0
 
   while IFS= read -r package; do
-    # Пропускаем пустые строки и комментарии
-    [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+    # Пропускаем пустые строки
+    [[ -z "$package" ]] && continue
     
     ((current++))
     print_colored $BLUE "[$current/$total_packages] Обработка пакета: $package"
     
     # Проверяем, нужно ли пересобирать пакет
     local needs_rebuild=false
-    if [[ "$force_rebuild" == "true" ]]; then
+    if [[ "$force_rebuild" == "true" ]] || [[ -n "$single_package_rebuild" ]]; then
       needs_rebuild=true
       print_colored $YELLOW "Принудительная пересборка пакета $package"
     else
@@ -341,17 +560,27 @@ build_packages() {
     fi
 
     if [[ "$needs_rebuild" == "true" ]]; then
+      # Создаем директорию сборки, если она еще не создана
+      if [[ ! -d "$build_dir" ]]; then
+          mkdir -p "$build_dir"
+      fi
+      cd "$build_dir" || exit 1
+      
       # Удаляем старые версии пакета
       rm -f "$aur_repo_dir"/${package}-*.pkg.tar.zst
       
       # Сборка пакета
       local yay_opts="--noconfirm --needed"
       [[ "$quiet" == "true" ]] && yay_opts="$yay_opts --quiet"
+      # Добавляем --rebuild если это принудительная пересборка
+      if [[ "$force_rebuild" == "true" ]] || [[ -n "$single_package_rebuild" ]]; then
+        yay_opts="$yay_opts --rebuild"
+      fi
       
       print_colored $BLUE "🔨 Сборка пакета $package..."
       if yay -S $yay_opts "$package"; then
         # Копируем собранный пакет в репозиторий
-        local pkg_file=$(find /home/$USER/.cache/yay/"$package" -name "*.pkg.tar.zst" -type f | head -1)
+        local pkg_file=$(find "/home/$USER/.cache/yay/$package" -name "*.pkg.tar.zst" -type f | head -1)
         if [[ -n "$pkg_file" && -f "$pkg_file" ]]; then
           cp "$pkg_file" "$aur_repo_dir/"
           built_packages+=("$package")
@@ -366,11 +595,13 @@ build_packages() {
       fi
     fi
     echo ""
-  done < "$aur_packages_file"
+  done <<< "$packages_to_process_list"
 
-  # Очистка временной директории
-  cd /
-  rm -rf "$build_dir"
+  # Очистка временной директории, если она была создана
+  if [ -d "$build_dir" ]; then
+    cd /
+    rm -rf "$build_dir"
+  fi
 
   # Отчет о сборке
   echo ""
@@ -385,19 +616,21 @@ build_packages() {
     printf '   %s\n' "${failed_packages[@]}"
   fi
 
-  if [[ ${#built_packages[@]} -eq 0 && ${#failed_packages[@]} -eq 0 ]]; then
+  if [[ ${#built_packages[@]} -eq 0 && ${#failed_packages[@]} -eq 0 && -z "$single_package_rebuild" ]]; then
     print_colored $YELLOW "ℹ️  Все пакеты актуальны, сборка не требуется"
   fi
 
-  # Обновляем базу данных репозитория
-  echo ""
-  update_repository
+  # Обновляем базу данных репозитория, если что-то изменилось
+  if [[ ${#built_packages[@]} -gt 0 ]]; then
+    echo ""
+    update_repository
+  fi
 }
 
 # Сборка пакетов (интерактивная)
 build_packages_interactive() {
   show_header
-  print_colored $BLUE "🔨 Сборка пакетов"
+  print_colored $BLUE "🔨 Сборка / Пересборка пакетов"
   echo ""
   
   if [[ ! -s "$aur_packages_file" ]]; then
@@ -406,13 +639,49 @@ build_packages_interactive() {
     return
   fi
   
-  local pkg_count=$(grep -c '^[^#]' "$aur_packages_file")
-  print_colored $BLUE "Найдено пакетов для сборки: $pkg_count"
+  echo "  1) Собрать/обновить все пакеты"
+  echo "  2) Пересобрать конкретный пакет"
+  echo "  0) Назад"
   echo ""
+  local choice=$(read_input "Выберите действие")
   
-  if confirm "Начать сборку пакетов?"; then
-    build_packages
-  fi
+  case $choice in
+    1)
+      if confirm "Начать сборку/обновление всех пакетов?"; then
+        build_packages
+      fi
+      ;;
+    2)
+      print_colored $BLUE "Выберите пакет для пересборки:"
+      local packages=()
+      local i=1
+      while IFS= read -r package; do
+        [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+        packages+=("$package")
+        echo "  $i) $package"
+        ((i++))
+      done < "$aur_packages_file"
+      echo ""
+      local pkg_choice=$(read_input "Введите номер пакета (или 'q' для выхода)")
+
+      if [[ "$pkg_choice" =~ ^[0-9]+$ ]] && [[ "$pkg_choice" -ge 1 && "$pkg_choice" -le ${#packages[@]} ]]; then
+        local package_to_rebuild="${packages[$((pkg_choice-1))]}"
+        if confirm "Пересобрать пакет '$package_to_rebuild'?"; then
+          build_packages "$package_to_rebuild"
+        fi
+      elif [[ "$pkg_choice" != "q" && "$pkg_choice" != "Q" ]]; then
+        print_colored $RED "❌ Неверный номер пакета"
+        sleep 1
+      fi
+      ;;
+    0)
+      return
+      ;;
+    *)
+      print_colored $RED "❌ Неверный выбор"
+      sleep 1
+      ;;
+  esac
   
   echo ""
   read -p "Нажмите Enter для возврата в меню..."
@@ -514,61 +783,6 @@ Server = file://$aur_target/os/\$arch"
   read -p "Нажмите Enter для возврата в меню..."
 }
 
-# Очистка старых пакетов
-clean_old_packages_interactive() {
-  show_header
-  print_colored $BLUE "🧹 Очистка старых пакетов"
-  echo ""
-  
-  # Получаем список установленных пакетов из списка
-  local keep_packages=()
-  while IFS= read -r package; do
-    [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
-    keep_packages+=("$package")
-  done < "$aur_packages_file"
-  
-  # Находим пакеты для удаления
-  local to_remove=()
-  for pkg_file in "$aur_repo_dir"/*.pkg.tar.zst; do
-    [[ ! -f "$pkg_file" ]] && continue
-    
-    local pkg_name=$(basename "$pkg_file" | sed 's/-[^-]*-[^-]*\.pkg\.tar\.zst$//')
-    local found=false
-    
-    for keep_pkg in "${keep_packages[@]}"; do
-      if [[ "$pkg_name" == "$keep_pkg" ]]; then
-        found=true
-        break
-      fi
-    done
-    
-    if [[ "$found" == "false" ]]; then
-      to_remove+=("$(basename "$pkg_file")")
-    fi
-  done
-  
-  if [[ ${#to_remove[@]} -eq 0 ]]; then
-    print_colored $GREEN "✅ Старые пакеты для удаления не найдены"
-  else
-    print_colored $YELLOW "Найдено старых пакетов для удаления: ${#to_remove[@]}"
-    echo ""
-    printf '   %s\n' "${to_remove[@]}"
-    echo ""
-    
-    if confirm "Удалить эти пакеты?"; then
-      for pkg in "${to_remove[@]}"; do
-        rm -f "$aur_repo_dir/$pkg"
-        print_colored $GREEN "🗑️  Удален: $pkg"
-      done
-      echo ""
-      update_repository
-    fi
-  fi
-  
-  echo ""
-  read -p "Нажмите Enter для возврата в меню..."
-}
-
 # Информация о пакете
 package_info_interactive() {
   show_header
@@ -643,7 +857,7 @@ main_interface() {
         setup_pacman_interactive
         ;;
       7)
-        clean_old_packages_interactive
+        clean_old_packages_cli
         ;;
       8)
         package_info_interactive
@@ -680,10 +894,136 @@ main() {
   if [[ $# -eq 0 ]]; then
     main_interface
   else
-    # Оставляем возможность запуска с параметрами для автоматизации
-    print_colored $YELLOW "⚠️  Режим с параметрами не поддерживается в новой версии"
-    print_colored $BLUE "Запустите скрипт без параметров для интерактивного режима"
-    exit 1
+    # Режим командной строки
+    local operation=""
+    local sub_operation=""
+    local cli_packages=()
+
+    # Обработка аргументов
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -h|--help)
+          usage
+          exit 0
+          ;;
+        -S|--sync)
+          operation="S"
+          shift
+          # Сохраняем все последующие аргументы как пакеты
+          while [[ $# -gt 0 ]] && ! [[ "$1" =~ ^- ]]; do
+            cli_packages+=("$1")
+            shift
+          done
+          ;;
+        -A|--add)
+          operation="A"
+          shift
+          while [[ $# -gt 0 ]] && ! [[ "$1" =~ ^- ]]; do
+            cli_packages+=("$1")
+            shift
+          done
+          ;;
+        -R|--remove)
+          operation="R"
+          shift
+          while [[ $# -gt 0 ]] && ! [[ "$1" =~ ^- ]]; do
+            cli_packages+=("$1")
+            shift
+          done
+          ;;
+        -Q|--query)
+          operation="Q"
+          shift
+          ;;
+        -C|--clean)
+          operation="C"
+          shift
+          ;;
+        -U|--update-db)
+          operation="U"
+          shift
+          ;;
+        --setup-pacman)
+          operation="SETUP"
+          shift
+          ;;
+        # Опции
+        -i|--info)
+          sub_operation="i"
+          shift
+          if [[ $# -gt 0 ]] && ! [[ "$1" =~ ^- ]]; then
+            cli_packages+=("$1")
+            shift
+          fi
+          ;;
+        -l|--list)
+          sub_operation="l"
+          shift
+          ;;
+        --force)
+          force_rebuild=true
+          shift
+          ;;
+        --quiet)
+          quiet=true
+          shift
+          ;;
+        *)
+          print_colored $RED "Неизвестная опция: $1"
+          usage
+          exit 1
+          ;;
+      esac
+    done
+
+    # Выполнение операций
+    case "$operation" in
+      S)
+        if [[ ${#cli_packages[@]} -gt 0 ]]; then
+          # Пересобрать конкретные пакеты
+          for pkg in "${cli_packages[@]}"; do
+            build_packages "$pkg"
+          done
+        else
+          # Собрать/обновить все
+          build_packages
+        fi
+        ;;
+      A)
+        add_packages_cli "${cli_packages[@]}"
+        ;;
+      R)
+        remove_packages_cli "${cli_packages[@]}"
+        ;;
+      Q)
+        case "$sub_operation" in
+          i)
+            if [[ ${#cli_packages[@]} -eq 0 ]]; then
+              print_colored $RED "Ошибка: для опции -i требуется указать имя пакета."
+              exit 1
+            fi
+            package_info_cli "${cli_packages[0]}"
+            ;;
+          l|*) # -l или действие по умолчанию для -Q
+            list_packages_cli
+            ;;
+        esac
+        ;;
+      C)
+        clean_old_packages_cli
+        ;;
+      U)
+        update_repository
+        ;;
+      SETUP)
+        setup_pacman_interactive
+        ;;
+      *)
+        print_colored $RED "Не указана операция."
+        usage
+        exit 1
+        ;;
+    esac
   fi
 }
 

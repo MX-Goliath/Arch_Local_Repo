@@ -147,37 +147,78 @@ for repo in core extra community multilib; do
   repo_dir="$target/$repo/os/$arch"
   db_name="${repo}-local.db.tar.gz"
   db_path="$repo_dir/$db_name"
-  state_file="$repo_dir/${repo}-local.state" # Файл для хранения хэша состояния пакетов
+  state_file="$repo_dir/${repo}-local.state" # Файл для хранения детального состояния пакетов
 
   # Пропускаем, если каталога нет
   [[ ! -d "$repo_dir" ]] && continue
 
-  # Собираем информацию о текущих .pkg.tar.zst файлах (имя, размер, время модификации)
-  # и вычисляем хэш этого состояния.
+  # Собираем информацию о текущих .pkg.tar.zst файлах
   current_pkg_files_details=""
-  # Проверяем, есть ли пакеты, чтобы find не выдавал ошибку в пустом каталоге при использовании -printf
   if compgen -G "$repo_dir/*.pkg.tar.zst" > /dev/null; then
-      current_pkg_files_details=$(find "$repo_dir" -maxdepth 1 -name '*.pkg.tar.zst' -printf '%f\t%s\t%T@\n' | sort)
+      current_pkg_files_details=$(find "$repo_dir" -maxdepth 1 -name '*.pkg.tar.zst' -printf '%f\t%s\t%Ts\n' | sort)
   fi
-  current_pkg_state_hash=$(echo -n "$current_pkg_files_details" | sha256sum | awk '{print $1}')
 
-  old_pkg_state_hash=""
+  # Читаем предыдущее состояние
+  old_pkg_files_details=""
   if [[ -f "$state_file" ]]; then
-    old_pkg_state_hash=$(cat "$state_file")
+    old_pkg_files_details=$(cat "$state_file")
   fi
 
-  if [[ "$current_pkg_state_hash" != "$old_pkg_state_hash" ]]; then
-    echo "Обнаружены изменения для $repo-local в $repo_dir (или отсутствует файл состояния). Запуск индексации..."
+  if [[ "$current_pkg_files_details" != "$old_pkg_files_details" ]]; then
+    echo "Обнаружены изменения для $repo-local в $repo_dir. Запуск инкрементальной индексации..."
 
-    # Генерируем/обновляем базу
-    if repo-add "$db_path" "$repo_dir"/*.pkg.tar.zst; then
-      # Сохраняем новый хэш состояния после успешной индексации
-      echo "$current_pkg_state_hash" > "$state_file"
-      echo "Индексация $repo-local успешно завершена, файл состояния обновлен."
+    # Создаем временные файлы для сравнения
+    current_list=$(mktemp)
+    old_list=$(mktemp)
+    
+    echo "$current_pkg_files_details" > "$current_list"
+    echo "$old_pkg_files_details" > "$old_list"
+    
+    # Находим новые/измененные пакеты
+    new_or_changed=$(comm -13 "$old_list" "$current_list" | cut -f1)
+    
+    # Находим удаленные пакеты
+    removed=$(comm -23 "$old_list" "$current_list" | cut -f1)
+    
+    update_ok=true
+
+    # Удаляем удаленные пакеты из базы
+    if [[ -n "$removed" ]] && [[ -f "$db_path" ]]; then
+      while IFS= read -r pkg_file; do
+        # Извлекаем имя пакета без расширения и версии
+        pkg_name=$(echo "$pkg_file" | sed 's/-[^-]*-[^-]*-[^-]*\.pkg\.tar\.zst$//')
+        echo "Удаляем пакет $pkg_name из базы $repo-local"
+        repo-remove "$db_path" "$pkg_name" 2>/dev/null || true
+      done <<< "$removed"
+    fi
+    
+    # Добавляем новые/измененные пакеты
+    if [[ -n "$new_or_changed" ]]; then
+      echo "Добавляем/обновляем пакеты в $repo-local:"
+      echo "$new_or_changed"
+      
+      # Формируем полные пути к файлам
+      pkg_files=()
+      while IFS= read -r pkg_file; do
+        [[ -n "$pkg_file" ]] && pkg_files+=("$repo_dir/$pkg_file")
+      done <<< "$new_or_changed"
+      
+      if [[ ${#pkg_files[@]} -gt 0 ]]; then
+        if ! repo-add "$db_path" "${pkg_files[@]}"; then
+          update_ok=false
+        fi
+      fi
+    fi
+    
+    # Очистка временных файлов
+    rm -f "$current_list" "$old_list"
+
+    # Сохраняем новое состояние после успешной индексации
+    if [[ "$update_ok" = true ]]; then
+      echo "$current_pkg_files_details" > "$state_file"
+      echo "Инкрементальная индексация $repo-local успешно завершена."
     else
-      echo "Ошибка во время выполнения repo-add для $repo-local. Файл состояния не обновлен." >&2
-      # Можно добавить удаление файла состояния, чтобы гарантировать повторную попытку при следующем запуске
-      # rm -f "$state_file"
+      echo "Ошибка во время выполнения индексации для $repo-local. Файл состояния не обновлен." >&2
     fi
   else
     echo "Изменений для $repo-local в $repo_dir не обнаружено. Пропуск индексации."
