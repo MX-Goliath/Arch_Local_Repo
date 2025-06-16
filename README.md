@@ -103,6 +103,20 @@ For each repository (`core`, `extra`, `community`, `multilib`):
 
 Example: If you have custom packages in `$target/extra/os/x86_64/`, the script will generate/update `$target/extra/os/x86_64/extra-local.db.tar.gz`.
 
+## Web Interface
+
+A simple Flask application in `webui/webui.py` provides a basic interface to view,
+search, and manage packages listed in `aur-packages.list`. To start the server:
+
+```bash
+pip install -r webui/requirements.txt
+python webui/webui.py
+```
+
+The UI allows adding or removing packages from the list and triggering builds via
+`sync-aur-local.sh`.
+
+
 This is useful if you maintain your own custom packages and want to serve them via the same local mirror structure.
 
 # Notes
